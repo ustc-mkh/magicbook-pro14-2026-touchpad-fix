@@ -1,0 +1,125 @@
+# Honor MagicBook Pro 14 2026 PTL touchpad ACPI workaround
+
+This repository contains a workaround for the Linux touchpad issue on Honor
+MagicBook Pro 14 2026 machines with Panther Lake firmware.
+
+The observed failure is in the firmware ACPI table `SSDT:I2C_DEVT`:
+
+```text
+ACPI Error: AE_AML_INTERNAL, (SSDT:I2C_DEVT) while loading table
+```
+
+When `I2C_DEVT` fails to load, the I2C HID touchpad is not enumerated.
+
+## Important
+
+Do not use the prebuilt 2025 `dsdt.*.aml` files on 2026 PTL machines.  Those
+files are full DSDT overrides for older ARL firmware and are not compatible with
+the 2026 PTL ACPI table set.
+
+For the 2026 PTL model, patch the local `I2C_DEVT` SSDT only.
+
+## What the patch does
+
+The helper searches the local ACPI dump for a bogus NFC device:
+
+```asl
+Device (NFC0)
+{
+    Name (_HID, "NTAG0001")
+    ...
+}
+```
+
+On the tested PTL firmware this node is inside `SSDT:I2C_DEVT`.  The script
+removes that device block and bumps the ACPI OEM revision, for example:
+
+```asl
+DefinitionBlock ("", "SSDT", 2, "HONOR", "I2C_DEVT", 0x00001000)
+```
+
+becomes:
+
+```asl
+DefinitionBlock ("", "SSDT", 2, "HONOR", "I2C_DEVT", 0x00001001)
+```
+
+The higher revision is required so Linux can upgrade the firmware table with
+the patched table.
+
+## Build
+
+Install tools:
+
+```sh
+sudo pacman -S acpica
+```
+
+Generate the patched table:
+
+```sh
+sudo ./scripts/build-local-override.sh build/ptl
+```
+
+Expected output:
+
+```text
+build/ptl/i2c_devt.aml
+```
+
+If only `build/ptl/ssdt27.patched.aml` is produced, that file is also usable;
+copy it as `i2c_devt.aml` in the install step.
+
+## Install With Limine
+
+Create an early ACPI override cpio:
+
+```sh
+mkdir -p /tmp/acpi_override/kernel/firmware/acpi
+cp build/ptl/i2c_devt.aml /tmp/acpi_override/kernel/firmware/acpi/i2c_devt.aml
+
+cd /tmp/acpi_override
+find kernel | cpio -H newc --create > /tmp/dsdt_override.cpio
+
+sudo cp /tmp/dsdt_override.cpio /boot/dsdt_override.cpio
+```
+
+Add the cpio to the active Linux entry in `/boot/limine.conf`:
+
+```text
+module_path: boot():/dsdt_override.cpio
+```
+
+The line must be in the same boot entry as the kernel and initramfs/module
+lines.  If Limine does not load this cpio, the ACPI override will not apply.
+
+Reboot.
+
+## Verify
+
+After reboot:
+
+```sh
+sudo dmesg | grep -Ei 'ACPI.*(upgrade|override)|I2C_DEVT|AE_AML'
+libinput list-devices
+```
+
+A failed boot still shows the original table and the load error:
+
+```text
+HONOR I2C_DEVT 00001000
+ACPI Error: AE_AML_INTERNAL, (SSDT:I2C_DEVT) while loading table
+```
+
+A successful boot should not report the `I2C_DEVT` `AE_AML_INTERNAL` load
+failure, and the touchpad should appear in `libinput`.
+
+## Notes
+
+- This workaround was validated with Limine by loading `/boot/dsdt_override.cpio`.
+- `mkinitcpio -P` alone is not enough if the system does not boot a mkinitcpio
+  initramfs image.
+- If using mkinitcpio's `acpi_override` hook instead of Limine module loading,
+  ensure `acpi_override` is present in `HOOKS` and the AML is under
+  `/etc/initcpio/acpi_override/`.
+- Keep generated `build/` files out of the repository.
